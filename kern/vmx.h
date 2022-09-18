@@ -6,6 +6,7 @@
 #include <linux/types.h>
 #include <asm/vmx.h>
 #include <linux/kvm_types.h>
+#include <linux/version.h>
 
 DECLARE_PER_CPU(struct vmx_vcpu *, local_vcpu);
 
@@ -97,11 +98,59 @@ vmx_do_ept_fault(struct vmx_vcpu *vcpu, unsigned long gpa,
 extern void vmx_ept_sync_vcpu(struct vmx_vcpu *vcpu);
 extern void vmx_ept_sync_individual_addr(struct vmx_vcpu *vcpu, gpa_t gpa);
 
+#define vmx_asm1(insn, op1, error_args...)                          \
+do {                                    \
+    asm_volatile_goto("1: " __stringify(insn) " %0\n\t"             \
+                      ".byte 0x2e\n\t" /* branch not taken hint */  \
+                      "jna %l[error]\n\t"                           \
+                      _ASM_EXTABLE(1b, %l[fault])                   \
+                      : : op1 : "cc" : error, fault);               \
+    return;                                                         \
+error:                                                              \
+    insn##_error(error_args);                                       \
+    return;                                                         \
+fault:                                                              \
+    return;                                                         \
+} while (0)
+
+#define vmx_asm2(insn, op1, op2, error_args...)                     \
+do {                                                                \
+    asm_volatile_goto("1: "  __stringify(insn) " %1, %0\n\t"        \
+                      ".byte 0x2e\n\t" /* branch not taken hint */  \
+                      "jna %l[error]\n\t"                           \
+                      _ASM_EXTABLE(1b, %l[fault])                   \
+                      : : op1, op2 : "cc" : error, fault);          \
+    return;                                                         \
+error:                                                              \
+    insn##_error(error_args);                                       \
+    return;                                                         \
+fault:                                                              \
+    return;                                                         \
+} while (0)
+
 static __always_inline unsigned long vmcs_readl(unsigned long field)
 {
-        unsigned long value;
+    unsigned long value;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+    asm volatile("1: vmread %2, %1\n\t"
+            ".byte 0x3e\n\t" /* branch taken hint */
+            "ja 3f\n\t"
+            "mov %2, %%" _ASM_ARG1 "\n\t"
+            "xor %%" _ASM_ARG2 ", %%" _ASM_ARG2 "\n\t"
+            "2: call vmread_error\n\t"
+            "xor %k1, %k1\n\t"
+            "3:\n\t"
 
-        asm volatile (ASM_VMX_VMREAD_RDX_RAX
-                      : "=a"(value) : "d"(field) : "cc");
-        return value;
+            ".pushsection .fixup, \"ax\"\n\t"
+            "4: mov %2, %%" _ASM_ARG1 "\n\t"
+            "mov $1, %%" _ASM_ARG2 "\n\t"
+            "jmp 2b\n\t"
+            ".popsection\n\t"
+            _ASM_EXTABLE(1b, 4b)
+            : ASM_CALL_CONSTRAINT, "=r"(value) : "r"(field) : "cc");
+#else
+    asm volatile (ASM_VMX_VMREAD_RDX_RAX
+            : "=a"(value) : "d"(field) : "cc");
+#endif
+    return value;
 }

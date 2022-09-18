@@ -147,17 +147,35 @@ static inline bool cpu_has_vmx_ept_ad_bits(void)
 	return vmx_capability.ept & VMX_EPT_AD_BIT;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+static noinline void invept_error(unsigned long ext, u64 eptp, gpa_t gpa)
+{
+    printk(KERN_ERR "kvm: invept failed: ext=0x%lx eptp=%llx gpa=0x%llx\n",
+           ext, eptp, gpa);
+	dump_stack();
+}
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+static inline void __invept(unsigned long ext, u64 eptp, gpa_t gpa)
+#else
 static inline void __invept(int ext, u64 eptp, gpa_t gpa)
+#endif
 {
 	struct {
 		u64 eptp, gpa;
 	} operand = {eptp, gpa};
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+    vmx_asm2(invept, "r"(ext), "m"(operand), ext, eptp, gpa);
+#else
 	asm volatile (ASM_VMX_INVEPT
 			/* CF==1 or ZF==1 --> rc = -1 */
 			"; ja 1f ; ud2 ; 1:\n"
 			: : "a" (&operand), "c" (ext) : "cc", "memory");
+#endif
 }
+
 
 static inline void ept_sync_global(void)
 {
@@ -180,17 +198,38 @@ static inline void ept_sync_individual_addr(u64 eptp, gpa_t gpa)
 
 static inline void __vmxon(u64 addr)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+    asm volatile ("vmxon %0" : : "m"(addr));
+#else
 	asm volatile (ASM_VMX_VMXON_RAX
 			: : "a"(&addr), "m"(addr)
 			: "memory", "cc");
+#endif
 }
 
 static inline void __vmxoff(void)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+    asm volatile ("vmxoff");
+#else
 	asm volatile (ASM_VMX_VMXOFF : : : "cc");
+#endif
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+static noinline void invvpid_error(unsigned long ext, u16 vpid, gva_t gva)
+{
+    printk(KERN_ERR "kvm: invvpid failed: ext=0x%lx vpid=%u gva=0x%lx\n",
+           ext, vpid, gva);
+	dump_stack();
+}
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+static inline void __invvpid(unsigned long ext, u16 vpid, gva_t gva)
+#else
 static inline void __invvpid(int ext, u16 vpid, gva_t gva)
+#endif
 {
     struct {
 	u64 vpid : 16;
@@ -198,10 +237,14 @@ static inline void __invvpid(int ext, u16 vpid, gva_t gva)
 	u64 gva;
     } operand = { vpid, 0, gva };
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+    vmx_asm2(invvpid, "r"(ext), "m"(operand), ext, vpid, gva);
+#else
     asm volatile (ASM_VMX_INVVPID
 		  /* CF==1 or ZF==1 --> rc = -1 */
 		  "; ja 1f ; ud2 ; 1:"
 		  : : "a"(&operand), "c"(ext) : "cc", "memory");
+#endif
 }
 
 static inline void vpid_sync_vcpu_single(u16 vpid)
@@ -227,9 +270,21 @@ static inline void vpid_sync_context(u16 vpid)
 		vpid_sync_vcpu_global();
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+static noinline void vmclear_error(struct vmcs *vmcs, u64 phys_addr)
+{
+    printk(KERN_ERR "kvm: vmclear failed: %p/%llx\n", vmcs, phys_addr);
+	dump_stack();
+}
+#endif
+
 static void vmcs_clear(struct vmcs *vmcs)
 {
 	u64 phys_addr = __pa(vmcs);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+    vmx_asm1(vmclear, "m"(phys_addr), vmcs, phys_addr);
+#else
 	u8 error;
 
 	asm volatile (ASM_VMX_VMCLEAR_RAX "; setna %0"
@@ -238,11 +293,24 @@ static void vmcs_clear(struct vmcs *vmcs)
 	if (error)
 		printk(KERN_ERR "kvm: vmclear fail: %p/%llx\n",
 		       vmcs, phys_addr);
+#endif
 }
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+static noinline void vmptrld_error(struct vmcs *vmcs, u64 phys_addr)
+{
+    printk(KERN_ERR "kvm: vmptrld failed: %p/%llx\n", vmcs, phys_addr);
+	dump_stack();
+}
+#endif
 
 static void vmcs_load(struct vmcs *vmcs)
 {
 	u64 phys_addr = __pa(vmcs);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+    vmx_asm1(vmptrld, "m"(phys_addr), vmcs, phys_addr);
+#else
 	u8 error;
 
 	asm volatile (ASM_VMX_VMPTRLD_RAX "; setna %0"
@@ -251,6 +319,7 @@ static void vmcs_load(struct vmcs *vmcs)
 	if (error)
 		printk(KERN_ERR "vmx: vmptrld %p/%llx failed\n",
 		       vmcs, phys_addr);
+#endif
 }
 
 static __always_inline u16 vmcs_read16(unsigned long field)
@@ -281,12 +350,16 @@ static noinline void vmwrite_error(unsigned long field, unsigned long value)
 
 static void vmcs_writel(unsigned long field, unsigned long value)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+    vmx_asm2(vmwrite, "r"(field), "rm"(value), field, value);
+#else
 	u8 error;
 
 	asm volatile (ASM_VMX_VMWRITE_RAX_RDX "; setna %0"
 		       : "=q"(error) : "a"(value), "d"(field) : "cc");
 	if (unlikely(error))
 		vmwrite_error(field, value);
+#endif
 }
 
 static void vmcs_write16(unsigned long field, u16 value)
@@ -501,7 +574,11 @@ static void vmx_setup_constant_host_state(void)
 
 	vmcs_writel(HOST_CR0, read_cr0() & ~X86_CR0_TS);  /* 22.2.3 */
 	vmcs_writel(HOST_CR4, __read_cr4());  /* 22.2.3, 22.2.5 */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+	vmcs_writel(HOST_CR3, __read_cr3());  /* 22.2.3 */
+#else
 	vmcs_writel(HOST_CR3, read_cr3());  /* 22.2.3 */
+#endif
 
 	vmcs_write16(HOST_CS_SELECTOR, __KERNEL_CS);  /* 22.2.4 */
 	vmcs_write16(HOST_DS_SELECTOR, __KERNEL_DS);  /* 22.2.4 */
@@ -509,7 +586,11 @@ static void vmx_setup_constant_host_state(void)
 	vmcs_write16(HOST_SS_SELECTOR, __KERNEL_DS);  /* 22.2.4 */
 	vmcs_write16(HOST_TR_SELECTOR, GDT_ENTRY_TSS*8);  /* 22.2.4 */
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+	store_idt(&dt);
+#else
 	native_store_idt(&dt);
+#endif
 	vmcs_writel(HOST_IDTR_BASE, dt.address);   /* 22.2.4 */
 
 	asm("mov $.Lkvm_vmx_return, %0" : "=r"(tmpl));
@@ -555,6 +636,7 @@ static unsigned long segment_base(u16 selector)
 	struct desc_struct *d;
 	unsigned long table_base;
 	unsigned long v;
+    unsigned long base3;
 
 	if (!(selector & ~3))
 		return 0;
@@ -572,8 +654,13 @@ static unsigned long segment_base(u16 selector)
 	d = (struct desc_struct *)(table_base + (selector & ~7));
 	v = get_desc_base(d);
 #ifdef CONFIG_X86_64
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+    base3 = (unsigned long)((struct ldttss_desc *)d)->base3;
+#else
+    base3 = (unsigned long)((struct ldttss_desc64 *)d)->base3;
+#endif
        if (d->s == 0 && (d->type == 2 || d->type == 9 || d->type == 11))
-               v |= ((unsigned long)((struct ldttss_desc64 *)d)->base3) << 32;
+           v |= base3 << 32;
 #endif
 	return v;
 }
@@ -762,6 +849,21 @@ static void vmx_dump_cpu(struct vmx_vcpu *vcpu)
 	spin_unlock(&vmx_dump_cpu_lock);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+static u64 construct_eptp(struct vmx_vcpu *vcpu, unsigned long root_hpa)
+{
+    u64 eptp = VMX_EPTP_MT_WB;
+
+    // TODO: currently only support 4 level EPT
+    eptp |= VMX_EPTP_PWL_4;
+
+    if (cpu_has_vmx_ept_ad_bits())
+        eptp |= VMX_EPTP_AD_ENABLE_BIT;
+    eptp |= (root_hpa & PAGE_MASK);
+
+    return eptp;
+}
+#else
 static u64 construct_eptp(unsigned long root_hpa)
 {
 	u64 eptp;
@@ -775,6 +877,7 @@ static u64 construct_eptp(unsigned long root_hpa)
 
 	return eptp;
 }
+#endif
 
 /**
  * vmx_setup_initial_guest_state - configures the initial state of guest registers
@@ -1115,7 +1218,12 @@ static struct vmx_vcpu * vmx_create_vcpu(struct dune_config *conf)
 	spin_lock_init(&vcpu->ept_lock);
 	if (vmx_init_ept(vcpu))
 		goto fail_ept;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+	vcpu->eptp = construct_eptp(vcpu, vcpu->ept_root);
+#else
 	vcpu->eptp = construct_eptp(vcpu->ept_root);
+#endif
 
 	vmx_get_cpu(vcpu);
 	vmx_setup_vmcs(vcpu);
@@ -1199,7 +1307,13 @@ static int dune_exit_group(int error_code)
 	vcpu->ret_code = DUNE_RET_EXIT;
 	vcpu->conf->status = error_code;
 
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+	force_sig(SIGTERM);
+#else
 	force_sig(SIGTERM, current);
+#endif
+
 	return 0;
 }
 
@@ -1239,8 +1353,12 @@ static void make_pt_regs(struct vmx_vcpu *vcpu, struct pt_regs *regs,
 	 * in a child process since it is not running in Dune.
 	 * Our solution is to adopt a special Dune convention
 	 * where the desired %RIP address is provided in %RCX.
-	 */ 
+	 */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+    if (!(regs->ip < user_addr_max()))
+#else
 	if (!(__addr_ok(regs->ip)))
+#endif
 		regs->ip = regs->cx;
 
 	regs->cs = __USER_CS;
@@ -1286,7 +1404,7 @@ static long dune_sys_fork(void)
 {
 	struct vmx_vcpu *vcpu;
 	struct pt_regs regs;
-	
+
 	asm("movq %%r11, %0" : "=r"(vcpu));
 
 	make_pt_regs(vcpu, &regs, __NR_fork);
@@ -1298,7 +1416,7 @@ static long dune_sys_vfork(void)
 {
 	struct vmx_vcpu *vcpu;
 	struct pt_regs regs;
-	
+
 	asm("movq %%r11, %0" : "=r"(vcpu));
 
 	make_pt_regs(vcpu, &regs, __NR_vfork);
@@ -1311,7 +1429,7 @@ static void vmx_init_syscall(void)
 {
 	memcpy(dune_syscall_tbl, (void *) SYSCALL_TBL,
 	       sizeof(sys_call_ptr_t) * NUM_SYSCALLS);
-	
+
 	dune_syscall_tbl[__NR_exit] = (void *) &dune_exit;
 	dune_syscall_tbl[__NR_exit_group] = (void *) &dune_exit_group;
 	dune_syscall_tbl[__NR_clone] = (void *) &dune_sys_clone;
@@ -1341,7 +1459,11 @@ static int __noclone vmx_run_vcpu(struct vmx_vcpu *vcpu)
 		"cmp %%"R"sp, %c[host_rsp](%0) \n\t"
 		"je 1f \n\t"
 		"mov %%"R"sp, %c[host_rsp](%0) \n\t"
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+        "vmwrite %%"R"sp, %%"R"dx \n\t"
+#else
 		ASM_VMX_VMWRITE_RSP_RDX "\n\t"
+#endif
 		"1: \n\t"
 		/* Reload cr2 if changed */
 		"mov %c[cr2](%0), %%"R"ax \n\t"
@@ -1373,9 +1495,17 @@ static int __noclone vmx_run_vcpu(struct vmx_vcpu *vcpu)
 
 		/* Enter guest mode */
 		"jne .Llaunched \n\t"
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+        "vmlaunch \n\t"
+#else
 		ASM_VMX_VMLAUNCH "\n\t"
+#endif
 		"jmp .Lkvm_vmx_return \n\t"
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+		".Llaunched: vmresume \n\t"
+#else
 		".Llaunched: " ASM_VMX_VMRESUME "\n\t"
+#endif
 		".Lkvm_vmx_return: "
 		/* Save guest registers, load host registers, keep flags */
 		"mov %0, %c[wordsize](%%"R"sp) \n\t"
@@ -1473,12 +1603,12 @@ static int vmx_handle_ept_violation(struct vmx_vcpu *vcpu)
 	gva = vmcs_readl(GUEST_LINEAR_ADDRESS);
 	gpa = vmcs_read64(GUEST_PHYSICAL_ADDRESS);
 	vmx_put_cpu(vcpu);
-	
+
 	if (exit_qual & (1 << 6)) {
 		printk(KERN_ERR "EPT: GPA 0x%lx exceeds GAW!\n", gpa);
 		return -EINVAL;
 	}
-	
+
 	if (!(exit_qual & (1 << 7))) {
 		printk(KERN_ERR "EPT: linear address is not valid, GPA: 0x%lx!\n", gpa);
 		return -EINVAL;
@@ -1516,7 +1646,7 @@ static void vmx_handle_syscall(struct vmx_vcpu *vcpu)
 		vcpu->regs[VCPU_REGS_RAX] = -EINVAL;
 		return;
 	}
-	
+
 	if (unlikely(vcpu->regs[VCPU_REGS_RAX] == __NR_sigaltstack ||
 		     vcpu->regs[VCPU_REGS_RAX] == __NR_iopl)) {
 		printk(KERN_INFO "vmx: got unsupported syscall\n");
@@ -1897,7 +2027,7 @@ static void vmx_free_vmxon_areas(void)
 __init int vmx_init(void)
 {
 	int r, cpu;
-	
+
 	if (!cpu_has_vmx()) {
 		printk(KERN_ERR "vmx: CPU does not support VT-x\n");
 		return -EIO;
@@ -1950,11 +2080,15 @@ __init int vmx_init(void)
 	}
 
 	atomic_set(&vmx_enable_failed, 0);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+    on_each_cpu(vmx_enable, NULL, 1);
+#else
 	if (on_each_cpu(vmx_enable, NULL, 1)) {
 		printk(KERN_ERR "vmx: timeout waiting for VMX mode enable.\n");
 		r = -EIO;
 		goto failed1; /* sadly we can't totally recover */
 	}
+#endif
 
 	if (atomic_read(&vmx_enable_failed)) {
 		r = -EBUSY;
@@ -1965,7 +2099,10 @@ __init int vmx_init(void)
 
 failed2:
 	on_each_cpu(vmx_disable, NULL, 1);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+#else
 failed1:
+#endif
 	vmx_free_vmxon_areas();
 	return r;
 }
